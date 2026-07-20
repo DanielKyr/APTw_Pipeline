@@ -1,0 +1,20 @@
+function tf = matching_nii_has_expected_volumes(niiFolder, idStr, expectedVolumes)
+% True if niiFolder contains at least one non-motion-corrected .nii file
+% whose name contains idStr AND whose 4th dimension equals
+% expectedVolumes exactly. Used by convert_dicom_to_nii to decide whether
+% an existing conversion is actually usable before skipping reconversion.
+tf = false;
+d = dir(fullfile(niiFolder, '*.nii'));
+d = d(~contains({d.name}, '_REG_') & ~contains({d.name}, 'resliced') & contains({d.name}, idStr));
+for k = 1:numel(d)
+    try
+        vol = readnifti(fullfile(niiFolder, d(k).name));
+    catch
+        continue
+    end
+    if size(vol, 4) == expectedVolumes
+        tf = true;
+        return
+    end
+end
+end

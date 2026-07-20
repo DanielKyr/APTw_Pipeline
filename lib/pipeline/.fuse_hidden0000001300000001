@@ -1,0 +1,34 @@
+function f = find_series_file(niiFolder, idStr, expectedVolumes)
+% Finds the (non motion-corrected, non-resliced) .nii file in niiFolder
+% whose name contains idStr, e.g. the APTw or WASABI series. If more than
+% one matches - most likely a stale file left over from an older run of
+% this script against the same nii folder - prefers whichever has exactly
+% expectedVolumes volumes (its 4th dimension), falling back to whichever
+% has the most volumes if none match exactly or expectedVolumes wasn't
+% given.
+if nargin < 3, expectedVolumes = []; end
+d = dir(fullfile(niiFolder, '*.nii'));
+d = d(~contains({d.name}, '_REG_') & ~contains({d.name}, 'resliced') & contains({d.name}, idStr));
+if isempty(d)
+    error('No NIfTI file found in %s matching "%s".', niiFolder, idStr);
+end
+if numel(d) == 1
+    f = fullfile(niiFolder, d(1).name);
+    return
+end
+
+nvols = zeros(numel(d), 1);
+for k = 1:numel(d)
+    vol = readnifti(fullfile(niiFolder, d(k).name));
+    nvols(k) = size(vol, 4);
+end
+if ~isempty(expectedVolumes) && any(nvols == expectedVolumes)
+    bestIdx = find(nvols == expectedVolumes, 1);
+else
+    [~, bestIdx] = max(nvols);
+end
+warning('Multiple NIfTI files in %s match "%s" (%s); using %s (%d volumes).', ...
+    niiFolder, idStr, strjoin({d.name}, ', '), d(bestIdx).name, nvols(bestIdx));
+f = fullfile(niiFolder, d(bestIdx).name);
+end
+
