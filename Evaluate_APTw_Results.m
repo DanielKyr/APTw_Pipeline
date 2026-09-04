@@ -40,34 +40,23 @@ addpath(genpath(fullfile(projectRoot, 'lib')));
 % are auto-detected below. Leave empty to pick interactively.
 DATA_ROOT = '';
 
-cfg = struct();
+% Series IDs, DICOM export encoding, aptw_metric/aptw_b1_corrected and saveOutputs
+% start from the shared defaults in lib/pipeline/aptw_default_cfg.m - the same
+% defaults the GUI (gui/APTwPipelineApp.m) uses for its own-map-only export.
+cfg = aptw_default_cfg();
 cfg.olea_id       = 'SC_ST';   % substring identifying the Olea-computed APTw series folder
 cfg.olea_b0_id    = 'dB0';     % substring identifying the Olea/scanner-computed B0 map series folder
 cfg.olea_b1_id    = 'rB1';     % substring identifying the Olea/scanner-computed relative-B1 map series folder
-cfg.aptw_metric   = 'rex';     % which APTw map to grade: 'fs' (conventional 1/Zref^2)
-                               % or 'rex' (inverse-Z / MTRRex). Both are written by
-                               % Run_APTw_Pipeline.m; flip this instead of editing code.
 cfg.olea_bgThresh = -10;       % Olea APTw values (%) below this are background -> excluded (B0/rB1 use segmentation only)
 cfg.olea_outlierK = 3;         % reject voxels with |diff-median(diff)| > K*(1.4826*MAD) from agreement stats
-
-% Our B0 map is fit in ppm and our B1 map is a dimensionless fraction of nominal
-% (fitted uT / nominal uT, ~1 = full power). Olea/scanner dB0 and rB1 series are
-% commonly exported in different units (dB0 often in Hz, rB1 often as a percent
-% of nominal), which is why they can look wildly off-scale even when the maps
-% agree. evaluate_one_map() prints the actual median(mine)/median(scanner) ratio
-% for each - use that number to set these (e.g. ~123.23 if B0 needs ppm->Hz at
-% 3T, ~100 if B1 needs fraction->percent). Leave at 1 if your Olea export is
-% already in the same units as ours.
-cfg.olea_b0_scale = 1;
-cfg.olea_b1_scale = 1;
+cfg.compare_b0_b1 = true;     % B0/B1 vs Olea has consistently landed at r=1.000 Set true to re-check
 cfg.olea_orient = struct( ...  % shared orientation for all three comparisons (APTw/B0/rB1) - tune with the
     'transpose', false, 'flipud', true, 'fliplr', false, 'rot90', 0, 'reverse_slices', false); % orientation-check figure
 cfg.sliceKeep   = 3:10;        % slices to include in stats/figures; [] = all
-cfg.saveOutputs = true;        % save stats .mat + figure PNGs into each subject's Zeval/ folder
 
 %% ========================= SELECT SUBJECTS =========================
 if isempty(DATA_ROOT)
-    DATA_ROOT = uigetdir(pwd, 'Select a subject folder, or a folder containing one sub-folder per subject');
+    DATA_ROOT = uigetdir('F:\CEST\Patient Data', 'Select a subject folder, or a folder containing one sub-folder per subject');
     if isequal(DATA_ROOT, 0)
         error('No folder selected.');
     end
@@ -118,9 +107,24 @@ resultsFile = fullfile(zevalFolder, [subjectID '_APTw_results.mat']);
 S = load(resultsFile);
 
 switch lower(cfg.aptw_metric)
-    case 'fs',  aptwMap = S.maps.APTw;
-    case 'rex', aptwMap = S.maps.APTw_rex;
+    case 'fs',  aptwField = 'APTw';
+    case 'rex', aptwField = 'APTw_rex';
     otherwise,  error('cfg.aptw_metric must be ''fs'' or ''rex'', got ''%s''.', cfg.aptw_metric);
+end
+if ~cfg.aptw_b1_corrected, aptwField = [aptwField '_noB1']; end
+if ~isfield(S.maps, aptwField)
+    error(['%s has no maps.%s field. If cfg.aptw_b1_corrected = false, this results file was ' ...
+           'likely written before the *_noB1 maps were added - re-run Run_APTw_Pipeline.m on this ' ...
+           'subject to regenerate it.'], resultsFile, aptwField);
+end
+aptwMap = S.maps.(aptwField);
+aptwLabel = 'APTw (%)';
+if ~cfg.aptw_b1_corrected, aptwLabel = 'APTw no-B1 (%)'; end
+
+if cfg.saveOutputs
+    % these two now live in lib/pipeline/ (shared with the GUI's own-map export)
+    save_aptw_nifti(subjFolder, zevalFolder, subjectID, aptwMap, aptwField);
+    save_aptw_dicom(subjFolder, zevalFolder, subjectID, aptwMap, aptwField, S.qc.Segment, cfg);
 end
 
 % One spec per comparison. scale=100 for APTw because the pipeline stores it as a
@@ -128,10 +132,10 @@ end
 % already in matching units. bgThresh=-Inf means "use the brain mask alone".
 comparisons = { ...
     struct('map', aptwMap,      'seriesID', cfg.olea_id,    'scale', 100, ...
-           'bgThresh', cfg.olea_bgThresh, 'label', 'APTw (%)',      'tag', 'aptw', 'diverging', true), ...
-    struct('map', S.maps.dB0map, 'seriesID', cfg.olea_b0_id, 'scale', cfg.olea_b0_scale, ...
+           'bgThresh', cfg.olea_bgThresh, 'label', aptwLabel,       'tag', 'aptw', 'diverging', true), ...
+    struct('map', S.maps.dB0map, 'seriesID', cfg.olea_b0_id, 'scale', 1, ...
            'bgThresh', -Inf,               'label', 'B0 (ppm)',      'tag', 'b0', 'diverging', true), ...
-    struct('map', S.maps.B1map,  'seriesID', cfg.olea_b1_id, 'scale', cfg.olea_b1_scale, ...
+    struct('map', S.maps.B1map,  'seriesID', cfg.olea_b1_id, 'scale', 1, ...
            'bgThresh', -Inf,               'label', 'B1 (relative)', 'tag', 'b1', 'diverging', false)};
 
 % Our own APTw/B0/B1 maps, in one figure. Needs nothing but the
@@ -140,9 +144,14 @@ comparisons = { ...
 plot_own_maps(subjectID, zevalFolder, comparisons, S.qc.Segment, cfg);
 
 % Then the scanner/Olea comparisons, each of which skips itself if its
-% counterpart series isn't there.
-for k = 1:numel(comparisons)
-    evaluate_one_map(subjFolder, subjectID, zevalFolder, comparisons{k}, S.qc.Segment, cfg);
+% counterpart series isn't there. B0/B1 are skipped entirely unless
+% cfg.compare_b0_b1 is true (see its definition for why).
+toCompare = comparisons;
+if ~cfg.compare_b0_b1
+    toCompare = toCompare(~ismember(cellfun(@(c) c.tag, toCompare, 'UniformOutput', false), {'b0', 'b1'}));
+end
+for k = 1:numel(toCompare)
+    evaluate_one_map(subjFolder, subjectID, zevalFolder, toCompare{k}, S.qc.Segment, cfg);
 end
 end
 
@@ -189,9 +198,12 @@ for k = 1:numel(comparisons)
     title(sprintf('%s   [%.3g %.3g]', cmp.label, w(1), w(2)))
     colorbar
     if cmp.diverging
-        lim = max(abs(w));
-        if lim > 0, caxis([-lim lim]); end
-        colormap(gca, bluewhitered)
+        % Window to the map's own 2-98% range (w) instead of forcing it
+        % symmetric around 0 - APTw in particular is skewed positive, so a
+        % forced [-lim lim] wasted most of the colormap on a negative range
+        % that barely occurs. bluewhitered(w) still anchors white at 0
+        % wherever 0 falls inside that (possibly asymmetric) window.
+        colormap(gca, bluewhitered(w))
     else
         colormap(gca, parula)
     end
@@ -242,11 +254,20 @@ if isempty(files)
     return
 end
 
-[slope, inter, haveScale] = read_dicom_rescale(files);
+[slope, inter, haveScale, divNote, seriesDesc] = read_dicom_rescale(files);
+if ~isempty(seriesDesc)
+    % Worth reading every time, not just once: it documents which corrections Olea
+    % applied to THIS series (e.g. "(wB0-wB1-Corr)" vs "(wB0-corr)" with no B1 term)
+    % - a subject can have a differently-corrected Olea map than another subject's,
+    % which shows up as a worse agreement that has nothing to do with our pipeline.
+    fprintf('%-14s scanner/Olea series: "%s"\n', label, seriesDesc);
+end
 if ~haveScale
     warning(['No RescaleSlope/RescaleIntercept found on any file for the scanner map matching "%s" - ' ...
         'using raw pixel values (slope=1, intercept=0) instead, which is likely wrong for an ' ...
         'Olea-computed parametric map.'], seriesID);
+elseif ~isempty(divNote)
+    fprintf('%-14s scanner/Olea DICOM: %s\n', label, divNote);
 end
 
 raw = read_dicom_stack(files);
@@ -311,8 +332,8 @@ fprintf('MAE  |mine-scanner|      : %.3f\n', mae);
 medMine = median(x); medScan = median(y);
 fprintf('median mine / scanner    : %.4g / %.4g  (ratio %.4g)\n', medMine, medScan, medMine / medScan);
 if ismember(tag, {'b0', 'b1'}) && (abs(medMine / medScan) > 5 || abs(medMine / medScan) < 0.2)
-    fprintf(['  -> looks like a unit/scale mismatch, not a real disagreement. Try setting cfg.olea_%s_scale ' ...
-        'to ~%.3g (currently %.3g) and re-running.\n'], tag, scaleMine * medScan / medMine, scaleMine);
+    fprintf(['  -> looks like a unit/scale mismatch, not a real disagreement. Check this series'' DICOM ' ...
+        'WindowCenterWidthExplanation tag (see read_dicom_rescale) for an undocumented descaling factor.\n']);
 end
 
 zr = find(sliceMask);
@@ -330,8 +351,11 @@ mine_disp    = mine;        mine_disp(~both)    = NaN;
 scanner_disp = scanner_map; scanner_disp(~both) = NaN;
 dMap         = mine - scanner_map; dMap(~both) = NaN;
 
-wMine = pctwin(mine(both));
-wScan = pctwin(scanner_map(both));
+% Shared window (pooled 2-98% range over both maps' overlap voxels) so mine
+% and scanner/Olea are on the same color scale and are actually visually
+% comparable - independently-windowed panels would show the same physical
+% value as different colors in each.
+wShared = pctwin([mine(both); scanner_map(both)]);
 dAbs = abs(dMap(~isnan(dMap)));
 if isempty(dAbs), dlim = [-1 1]; else, dw = pctwin(dAbs); dlim = [-1 1] * max(dw(2), eps); end
 
@@ -339,9 +363,9 @@ if isempty(dAbs), dlim = [-1 1]; else, dw = pctwin(dAbs); dlim = [-1 1] * max(dw
 % colormap+colorbar (per-axes colormap - each subplot sets its own via
 % colormap(gca, ...) rather than one shared figure-wide colormap).
 figure('Name', sprintf('%s: maps + difference (%s)', subjectID, label), 'Color', 'w', 'Position', [60 80 1320 480], 'Tag', figTag);
-subplot(1,3,1); m = tile(mine_disp, zr);    h = imagesc(m, wMine); set(h,'AlphaData',~isnan(m)); axis image off, title(sprintf('mine  [%.2g %.2g]', wMine)), colorbar, colormap(gca, parula)
-subplot(1,3,2); m = tile(scanner_disp, zr); h = imagesc(m, wScan); set(h,'AlphaData',~isnan(m)); axis image off, title(sprintf('scanner/Olea  [%.2g %.2g]', wScan)), colorbar, colormap(gca, parula)
-subplot(1,3,3); m = tile(dMap, zr);         h = imagesc(m, dlim);  set(h,'AlphaData',~isnan(m)); axis image off, title('mine - scanner/Olea'), colorbar, colormap(gca, bluewhitered)
+subplot(1,3,1); m = tile(mine_disp, zr);    h = imagesc(m, wShared); set(h,'AlphaData',~isnan(m)); axis image off, title(sprintf('mine  [%.2g %.2g]', wShared)), colorbar, colormap(gca, parula)
+subplot(1,3,2); m = tile(scanner_disp, zr); h = imagesc(m, wShared); set(h,'AlphaData',~isnan(m)); axis image off, title(sprintf('scanner/Olea  [%.2g %.2g]', wShared)), colorbar, colormap(gca, parula)
+subplot(1,3,3); m = tile(dMap, zr);         h = imagesc(m, dlim);  set(h,'AlphaData',~isnan(m)); axis image off, title('mine - scanner/Olea'), colorbar, colormap(gca, bluewhitered(dlim))
 
 %% ---- scatter + Bland-Altman ----
 figure('Name', sprintf('%s: scatter & Bland-Altman (%s)', subjectID, label), 'Color', 'w', 'Position', [100 100 1000 440], 'Tag', figTag);
@@ -410,26 +434,51 @@ end
 end
 
 
-function [slope, inter, haveScale] = read_dicom_rescale(files)
+function [slope, inter, haveScale, divNote, seriesDesc] = read_dicom_rescale(files)
 % Searches files (in order) for the first one that actually carries both
 % RescaleSlope and RescaleIntercept, skipping any that error out (e.g. a
 % DICOMDIR/report file bundled into the same folder) or simply lack the
 % tags (e.g. a non-image DICOM object) - settling for the first merely
 % *readable* file regardless of whether it has these tags would silently
-% produce wrong-scaled Olea maps.
-slope = 1; inter = 0; haveScale = false;
+% produce wrong-scaled Olea maps. Also grabs SeriesDescription wherever it's
+% found (not necessarily the same file - some files in a series folder are
+% reports/summaries without image tags), since it documents which
+% corrections Olea applied to THIS series (e.g. B0-only vs B0+B1), which a
+% blind RescaleSlope/Intercept decode can't tell you.
+%
+% Olea also sometimes stores these parametric maps pre-multiplied by an
+% integer (so they fit in an unsigned pixel range) and documents the
+% descaling factor in WindowCenterWidthExplanation as "<N>Division" - e.g.
+% dB0/rB1 series carry "1000Division" but the APTw series doesn't. Confirmed
+% empirically on CEST008: without dividing by it, dB0/rB1 vs our own maps
+% regress at a fit slope of ~900-1000 (i.e. off by ~1000x); after dividing,
+% they land in the same units as our maps (dB0 in ppm, rB1 as a fraction of
+% nominal centered on 1.0). RescaleSlope/Intercept alone was NOT enough here.
+slope = 1; inter = 0; haveScale = false; divNote = ''; seriesDesc = '';
 for k = 1:numel(files)
     try
         info1 = dicominfo(fullfile(files(k).folder, files(k).name));
     catch
         continue
     end
-    if isfield(info1, 'RescaleSlope') && isfield(info1, 'RescaleIntercept')
+    if isempty(seriesDesc) && isfield(info1, 'SeriesDescription')
+        seriesDesc = info1.SeriesDescription;
+    end
+    if ~haveScale && isfield(info1, 'RescaleSlope') && isfield(info1, 'RescaleIntercept')
         slope = double(info1.RescaleSlope);
         inter = double(info1.RescaleIntercept);
         haveScale = true;
-        return
+        if isfield(info1, 'WindowCenterWidthExplanation')
+            tok = regexp(info1.WindowCenterWidthExplanation, '(\d+)\s*Division', 'tokens', 'once');
+            if ~isempty(tok)
+                div = str2double(tok{1});
+                slope = slope / div; inter = inter / div;
+                divNote = sprintf('dividing by %g per WindowCenterWidthExplanation="%s"', ...
+                    div, info1.WindowCenterWidthExplanation);
+            end
+        end
     end
+    if haveScale && ~isempty(seriesDesc), return; end
 end
 end
 
@@ -466,16 +515,6 @@ if o.rot90 ~= 0,      v = rot90(v, o.rot90); end
 if o.reverse_slices,  v = flip(v, 3); end
 end
 
-
-function w = pctwin(v)
-% robust 2-98 percentile display window (no toolbox needed)
-s = sort(v(:)); s = s(~isnan(s)); n = numel(s);
-if n < 2, w = [0 1]; return; end
-w = [s(max(1, round(0.02*n)))  s(min(n, round(0.98*n)))];
-if w(2) <= w(1), w(2) = w(1) + eps; end
-end
-
-
 function r = pearsonr(x, y)
 x = x(:); y = y(:); c = corrcoef(x, y); r = c(1,2);
 end
@@ -501,9 +540,3 @@ for i = 1:n
 end
 end
 
-
-function cmap = bluewhitered
-% simple blue-white-red diverging colormap for difference maps
-n = 128; up = linspace(0, 1, n)';
-cmap = [ [up up ones(n,1)]; [ones(n,1) flipud(up) flipud(up)] ];
-end

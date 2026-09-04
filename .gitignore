@@ -1,0 +1,3 @@
+# Build output of packaging/build_standalone_exe.m - regenerated from source,
+# not something to version (the exe alone is 100+MB, plus a staged SPM copy).
+packaging/build/
