@@ -100,7 +100,39 @@ mov_index_incomplete = mov_index;
 interp_trafo_index2=ismember(mov_index,interp_trafo_index); %interp_trafo_index2 = List which offsets out of mov_index shall be interpolated
 mov_index_incomplete(interp_trafo_index2) = [];
 
-parfor ii = mov_index
+% Bias field correction is meant to correct RF receive-coil inhomogeneity -
+% a property of the coil geometry that doesn't meaningfully change between
+% offsets of the same short scan. Previously RunSPM_BFC (full SPM unified
+% segmentation) ran independently for EVERY offset in mov_index, which was
+% both ~30x redundant work and a real reliability problem: offsets near
+% on-resonance (e.g. 0 ppm) are the most heavily water-saturated, lowest-
+% contrast images in the whole Z-spectrum, and handing SPM's segmentation a
+% near-featureless image can make it fail to converge (observed: SPM
+% segmentation hanging indefinitely on the ~0 ppm offsets specifically,
+% reproduced on two different subjects). Instead, estimate the bias field
+% ONCE from mov_index(1) - the first offset in the same 4D stack as every
+% other offset here, so it shares their exact voxel grid with no resampling
+% needed - and reuse that one field on every offset via plain division
+% (apply_bias_field, below), which can't hang since it's not an SPM call.
+sharedBiasField = '';
+if runBFC && ~UseOnlyGM
+    biasRefIdx = mov_index(1);
+    biasRefName = fullfile(tmpFolder, ['biasref_' num2str(biasRefIdx) '.nii']);
+    spm_file_merge(mov_spm_vol(biasRefIdx), biasRefName);
+    [~, sharedBiasField] = RunSPM_BFC(biasRefName);
+end
+
+% NOT parfor: RunSPMCoregistration (and, when UseOnlyGM, CreateBinaryBrainmaskWithSPM)
+% call spm_jobman('run', ...) here, and calling spm_jobman from multiple
+% SIMULTANEOUS parallel workers has been observed to hang indefinitely and
+% unreliably under the compiled MATLAB Runtime (the standalone .exe) - even
+% though it works fine interpreted, and even though OTHER parallel steps in
+% this pipeline (e.g. FIT_3D's WASABI fit) are completely safe, because they
+% never call into SPM's batch/job system at all. apply_bias_field above is
+% pure arithmetic (no SPM call) and stays safe either way, but this loop's
+% actual SPM calls need to run one at a time. Each spm_coreg call is fast
+% (~1s), so serial execution of ~28 offsets is not a meaningful slowdown.
+for ii = mov_index
     if ismember(ii, mov_index_incomplete)
         mov3DName = fullfile(tmpFolder, ['mov_' num2str(ii) '.nii']);
         mov3DBFCName = fullfile(tmpFolder, ['mmov_' num2str(ii) '.nii']);
@@ -112,7 +144,7 @@ parfor ii = mov_index
                 CreateBinaryBrainmaskWithSPM(mov3DName, .2, ii, 0, 0);
                 spm_vol_new(ii).mat = RunSPMCoregistration(fix3DName,mov3DUseOnlyGMName,spmMethod);
             else
-                RunSPM_BFC(mov3DName);
+                apply_bias_field(mov3DName, sharedBiasField, mov3DBFCName);
                 spm_vol_new(ii).mat = RunSPMCoregistration(fix3DName,mov3DBFCName,spmMethod);
             end
         else
@@ -298,4 +330,26 @@ delete *]spm.mat temp.nii
 
 
 
+end
+
+
+function apply_bias_field(inImg, biasFieldImg, outImg)
+% APPLY_BIAS_FIELD  Writes outImg = inImg ./ biasFieldImg (voxel-wise), i.e.
+% bias-corrects inImg using an ALREADY-ESTIMATED bias field instead of
+% running SPM segmentation again - see the comment above this function's
+% call site in this file for why. inImg and biasFieldImg must share the same
+% voxel grid (guaranteed here since both come from splitting the same 4D
+% stack - see call site).
+Vin   = spm_vol(inImg);
+Vbias = spm_vol(biasFieldImg);
+Yin   = spm_read_vols(Vin);
+Ybias = spm_read_vols(Vbias);
+
+Yout = Yin ./ Ybias;
+Yout(~isfinite(Yout)) = 0; % background voxels (near-zero in both) can divide to NaN/Inf
+
+Vout = Vin;
+Vout.fname = outImg;
+Vout.dt = [spm_type('float32') 0];
+spm_write_vol(Vout, Yout);
 end

@@ -1,4 +1,12 @@
-function RunSPM_BFC(origImg)
+function [correctedImg, biasFieldImg] = RunSPM_BFC(origImg)
+% RUNSPM_BFC  Bias-field-corrects origImg via SPM unified segmentation, using
+% the segmentation only as a means to estimate the bias field (all tissue
+% class outputs are disabled below) - correctedImg is the bias-corrected
+% image SPM writes ('m'-prefixed); biasFieldImg is the raw bias field itself
+% ('BiasField_'-prefixed), returned so a caller can reuse it on OTHER images
+% via simple division instead of re-running this (expensive, and unreliable
+% on low-contrast input) segmentation once per image - see CEST_MOCO_spm.m's
+% header comment for why that matters.
 
 %get spm version and path
 spm_Version = which('spm');
@@ -9,7 +17,7 @@ end
 matlabbatch{1}.spm.spatial.preproc.channel.vols = {[origImg ',1']};
 matlabbatch{1}.spm.spatial.preproc.channel.biasreg = 0.001;
 matlabbatch{1}.spm.spatial.preproc.channel.biasfwhm = 30;
-matlabbatch{1}.spm.spatial.preproc.channel.write = [0 1];
+matlabbatch{1}.spm.spatial.preproc.channel.write = [1 1]; % [bias field, bias-corrected image] - both written now so the field can be reused
 matlabbatch{1}.spm.spatial.preproc.tissue(1).tpm = {[spm_path '\tpm\TPM.nii,1']};
 matlabbatch{1}.spm.spatial.preproc.tissue(1).ngaus = 1;
 matlabbatch{1}.spm.spatial.preproc.tissue(1).native = [0 0];
@@ -43,5 +51,14 @@ matlabbatch{1}.spm.spatial.preproc.warp.samp = 3;
 matlabbatch{1}.spm.spatial.preproc.warp.write = [0 0];
 spm('defaults', 'FMRI');
 spm_jobman('run', matlabbatch, cell(0,1));
+
+[fp, fn, fe] = fileparts(origImg);
+correctedImg = fullfile(fp, ['m' fn fe]);
+biasFieldCandidates = dir(fullfile(fp, ['BiasField_' fn '*']));
+if isempty(biasFieldCandidates)
+    error('RunSPM_BFC:noBiasField', ...
+        'Expected a BiasField_%s* output next to %s but found none - SPM may have changed its output naming convention.', fn, origImg);
+end
+biasFieldImg = fullfile(biasFieldCandidates(1).folder, biasFieldCandidates(1).name);
 
 end
