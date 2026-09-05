@@ -129,10 +129,7 @@ Windows app that runs on a machine with **no MATLAB installed and no
 MATLAB license**. The target machine only needs the free, separately
 redistributable MATLAB Runtime (see the readme.txt the build produces, or
 `packaging/build/APTwGUI/requiredMCRProducts.txt` for exactly which
-version). Requires MATLAB Compiler (a licensed product - `license('test',
-'Compiler')` - that must actually be *installed*, not just entitled; if
-`mcc` is undefined, install it via your MathWorks account / the MATLAB
-installer's "add products" flow for this exact release).
+version). 
 
 What makes this work, beyond just pointing the compiler at the GUI:
 - **No `matlab.exe` dependency at runtime.** The GUI's background batch
@@ -200,17 +197,3 @@ folder to see facts instead of guessing:
 Check_DICOM_Series('C:\...\CEST008\CEST008_..._WASABI')
 ```
 
-## What's deliberately excluded
-
-This folder contains only the functions actually reached at runtime
-given this pipeline's fixed settings (motion correction via SPM only,
-WASABI fit model `WASABIFIT_2abs`/021031, non-neural lookup table for
-fit initial guesses). The full `cest_eval-main` repository has many
-other pipelines, MOCO methods (AFNI, elastix, LRAZ), and fit models
-that this pipeline doesn't use - none of that is copied here. If you
-need those, use the full repository instead.
-
-One thing no script can check for you: if your B1 (slab-selective
-transmit) data differs in brightness between slices, run
-`FAUBATCH_B1map_Correction.m` (in the full `cest_eval-main` repository)
-on it BEFORE using this pipeline.

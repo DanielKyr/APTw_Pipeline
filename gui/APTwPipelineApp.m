@@ -181,12 +181,10 @@ classdef APTwPipelineApp < handle
         end
 
         function d = pickDefaultDataRoot(~)
-            candidate = 'F:\CEST\Patient Data';
-            if isfolder(candidate)
-                d = candidate;
-            else
-                d = pwd;
-            end
+            % No hardcoded default - '' lets uigetdir open to its own
+            % remembered/last-used location, which works the same on any
+            % machine instead of pointing at a path specific to one.
+            d = '';
         end
 
         function checkDependencies(app)
