@@ -1,4 +1,4 @@
-function varargout = CEST_MOCO(fix_name, mov_name, fix_index, mov_index, method, bfc, interp_trafo_index ,pure_interpolate, UseOnlyGM)
+function varargout = CEST_MOCO(fix_name, mov_name, fix_index, mov_index, method, bfc, interp_trafo_index ,pure_interpolate, UseOnlyGM, coregSep)
 % call by e.g.
 %  CEST_MOCO('WASABI.nii','NOE.nii',[1],[],'matlab_edge')
 % CEST_MOCO('MIMOSA_MPI3M0_720nT_VS_20191125092128_10.nii','MIMOSA_MPI3M0_720nT_20191125092128_8.nii',[2],[],'spm','bfc')
@@ -20,6 +20,10 @@ end
 
 if nargin < 9
     UseOnlyGM = 0;
+end
+
+if nargin < 10
+    coregSep = []; % spm methods only: SPM coregistration sampling schedule, [] = default
 end
 
 % get path of mov image for storage
@@ -98,7 +102,7 @@ switch method
         
     case 'spm'
 
-        CEST_MOCO_spm(fix_name, mov_name,new_name,fix_index, mov_index,runBFC, interp_trafo_index, 1, UseOnlyGM);
+        CEST_MOCO_spm(fix_name, mov_name,new_name,fix_index, mov_index,runBFC, interp_trafo_index, 1, UseOnlyGM, coregSep);
         
     case 'spm_realign'
 

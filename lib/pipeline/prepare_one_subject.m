@@ -4,19 +4,30 @@ function regFile = prepare_one_subject(subjFolder, cfg, binFolder)
 % Recognized cfg fields (see aptw_default_cfg.m for defaults):
 %   singleB1_id, wasabi_id, aptw_seq, wasabi_seq   - sequence identification
 %   force_dicom_conversion, force_moco             - cache-bypass toggles
+%   emit_stage_markers                             - if true, prints DICOM/MOCO "__STAGE__:" sentinels
+if ~isfield(cfg, 'emit_stage_markers'), cfg.emit_stage_markers = false; end
+if isfield(cfg, 'use_parallel')
+    if ~isfield(cfg, 'max_workers'), cfg.max_workers = 0; end
+    aptw_parallel_enabled(cfg.use_parallel, cfg.max_workers);
+end
+if ~isfield(cfg, 'moco_coreg_sep'), cfg.moco_coreg_sep = []; end
 niiFolder = fullfile(subjFolder, 'nii');
 
 % ---- 1. Convert DICOM to NIfTI if needed. convert_dicom_to_nii decides
 %         for itself by checking nii CONTENT (correct volume count), not
 %         mere file existence, so an interrupted earlier conversion cannot
 %         leave stale fragments that get reused forever.
+if cfg.emit_stage_markers, fprintf('__STAGE__:DICOM_START\n'); end
 convert_dicom_to_nii(subjFolder, cfg, binFolder);
+if cfg.emit_stage_markers, fprintf('__STAGE__:DICOM_DONE\n'); end
 
 aptwFile   = find_series_file(niiFolder, cfg.singleB1_id, numel(cfg.aptw_seq.offsetlist_ppm));
 wasabiFile = find_series_file(niiFolder, cfg.wasabi_id,   numel(cfg.wasabi_seq.offsetlist_ppm));
 
 % ---- 2. Motion-correct the Z-spectrum time series onto the WASABI volume.
+if cfg.emit_stage_markers, fprintf('__STAGE__:MOCO_START\n'); end
 regFile = ensure_motion_corrected(niiFolder, aptwFile, wasabiFile, cfg);
+if cfg.emit_stage_markers, fprintf('__STAGE__:MOCO_DONE\n'); end
 end
 
 function convert_dicom_to_nii(subjFolder, cfg, binFolder)
@@ -147,13 +158,30 @@ function regFile = ensure_motion_corrected(niiFolder, aptwFile, wasabiFile, cfg)
 % offset 1 of the WASABI volume, using CEST_MOCO. Reuses an
 % existing *_REG_* result instead of recomputing it unless
 % cfg.force_moco is true.
+%
+% CEST_MOCO_spm creates the *_REG_* file as an UNCORRECTED copy of the raw
+% stack before registering any offset, so an interrupted run (cancel, crash,
+% hang + restart) leaves a *_REG_* file that looks finished but isn't
+% motion-corrected at all. Only a *_REG_* file with a "<name>.complete"
+% marker next to it - written below once CEST_MOCO has fully returned - is
+% trusted; anything else is deleted and redone.
 [~, aptwBase] = fileparts(aptwFile);
 existing = dir(fullfile(niiFolder, [aptwBase '_REG_*.nii']));
-if ~isempty(existing) && ~cfg.force_moco
-    [~, idx] = max([existing.datenum]);
-    regFile = fullfile(niiFolder, existing(idx).name);
-    fprintf('Reusing existing motion-corrected file: %s\n', existing(idx).name);
-    return
+if ~cfg.force_moco
+    complete = arrayfun(@(e) isfile(fullfile(niiFolder, [e.name '.complete'])), existing);
+    if any(complete)
+        done = existing(complete);
+        [~, idx] = max([done.datenum]);
+        regFile = fullfile(niiFolder, done(idx).name);
+        fprintf('Reusing existing motion-corrected file: %s\n', done(idx).name);
+        return
+    end
+end
+for k = 1:numel(existing)
+    fprintf('Discarding incomplete/stale motion-corrected file: %s\n', existing(k).name);
+    delete(fullfile(niiFolder, existing(k).name));
+    staleMarker = fullfile(niiFolder, [existing(k).name '.complete']);
+    if isfile(staleMarker), delete(staleMarker); end
 end
 
 origDir = pwd;
@@ -164,6 +192,9 @@ cd(niiFolder);
 fprintf('Running motion correction of %s onto %s (offset %d)...\n', ...
     [aptwName aptwExt], [wasabiName wasabiExt], 1);
 newName = CEST_MOCO([wasabiName wasabiExt], [aptwName aptwExt], 1, [], ...
-    'spm', 'bfc', cfg.aptw_seq.moco_interp_idx);
+    'spm', 'bfc', cfg.aptw_seq.moco_interp_idx, 0, 0, cfg.moco_coreg_sep);
 regFile = fullfile(niiFolder, newName);
+fid = fopen([regFile '.complete'], 'w');
+fprintf(fid, 'motion correction completed %s\n', char(datetime('now')));
+fclose(fid);
 end

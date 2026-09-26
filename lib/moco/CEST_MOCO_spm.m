@@ -1,4 +1,4 @@
-function [moved, txMats]= CEST_MOCO_spm(fix_name, mov_name,new_name,fix_index, mov_index, runBFC, interp_trafo_index,spmMethod, UseOnlyGM)
+function [moved, txMats]= CEST_MOCO_spm(fix_name, mov_name,new_name,fix_index, mov_index, runBFC, interp_trafo_index,spmMethod, UseOnlyGM, coregSep)
 
 moved = [];
 if nargin < 6
@@ -13,6 +13,9 @@ end
 if nargin < 9
     UseOnlyGM = 0;
 end
+if nargin < 10
+    coregSep = []; % [] = RunSPMCoregistration's default sampling schedule
+end
 
 
 %get info from input files
@@ -26,9 +29,10 @@ end
 
 %temp folder for intermediate 3d outputs
 tmpFolder = [fpM '/tmp_spm'];
-if ~exist(tmpFolder, 'dir')
-   mkdir(tmpFolder);
+if exist(tmpFolder, 'dir')
+   rmdir(tmpFolder, 's'); % leftovers from an interrupted run - never reuse them
 end
+mkdir(tmpFolder);
 %MF fix for parallel computing
 % tmpFolder = [fpM '/tmp_spm_' mov_file_name ];
 % if ~exist(tmpFolder, 'dir')
@@ -52,7 +56,8 @@ if runBFC
     if UseOnlyGM
         CreateBinaryBrainmaskWithSPM(fix3DName, .2, fix_index, 0, 0);
         fix3DName = fullfile(tmpFolder, 'c1fix.nii');
-    else        
+    else
+        fprintf('MOCO: estimating bias field of the reference volume (SPM ''Segment'' is used only for bias correction here)...\n');
         RunSPM_BFC(fix3DName);
         fix3DName = fullfile(tmpFolder, 'mfix.nii');       
     end
@@ -119,47 +124,49 @@ if runBFC && ~UseOnlyGM
     biasRefIdx = mov_index(1);
     biasRefName = fullfile(tmpFolder, ['biasref_' num2str(biasRefIdx) '.nii']);
     spm_file_merge(mov_spm_vol(biasRefIdx), biasRefName);
+    fprintf('MOCO: estimating bias field of the moving series (SPM ''Segment'', bias correction only)...\n');
     [~, sharedBiasField] = RunSPM_BFC(biasRefName);
 end
 
-% NOT parfor: RunSPMCoregistration (and, when UseOnlyGM, CreateBinaryBrainmaskWithSPM)
-% call spm_jobman('run', ...) here, and calling spm_jobman from multiple
-% SIMULTANEOUS parallel workers has been observed to hang indefinitely and
-% unreliably under the compiled MATLAB Runtime (the standalone .exe) - even
-% though it works fine interpreted, and even though OTHER parallel steps in
-% this pipeline (e.g. FIT_3D's WASABI fit) are completely safe, because they
-% never call into SPM's batch/job system at all. apply_bias_field above is
-% pure arithmetic (no SPM call) and stays safe either way, but this loop's
-% actual SPM calls need to run one at a time. Each spm_coreg call is fast
-% (~1s), so serial execution of ~28 offsets is not a meaningful slowdown.
-for ii = mov_index
-    if ismember(ii, mov_index_incomplete)
-        mov3DName = fullfile(tmpFolder, ['mov_' num2str(ii) '.nii']);
-        mov3DBFCName = fullfile(tmpFolder, ['mmov_' num2str(ii) '.nii']);
-        mov3DUseOnlyGMName = fullfile(tmpFolder, ['c1mov_' num2str(ii) '.nii']);  
+% Each offset is coregistered independently onto the same reference, so
+% the offsets are spread over the parallel pool (parfor). An earlier
+% version ran this serially because the compiled exe "hung" here - that
+% turned out to be the GUI's worker blocking on a full, unread stdout pipe
+% (fixed in APTwPipelineApp.launchSubjectProcess), not parallel SPM. Every
+% file an iteration writes is per-offset (mov_<ii>, mmov_<ii>, c1mov_<ii>),
+% and the reference image is only read, so iterations don't interfere.
+% cfg.use_parallel = false runs it serially; cfg.max_workers caps the pool.
+if aptw_ensure_pool()
+    nWorkers = Inf; mode = 'parallel';
+else
+    nWorkers = 0;   mode = 'serial';
+end
+nCoreg = numel(mov_index_incomplete);
+fprintf('MOCO: coregistering %d offsets (%s)...\n', nCoreg, mode);
+coregMats = cell(1, nCoreg);
+parfor (k = 1:nCoreg, nWorkers)
+    ii = mov_index_incomplete(k);
+    mov3DName = fullfile(tmpFolder, ['mov_' num2str(ii) '.nii']);
+    mov3DBFCName = fullfile(tmpFolder, ['mmov_' num2str(ii) '.nii']);
+    mov3DUseOnlyGMName = fullfile(tmpFolder, ['c1mov_' num2str(ii) '.nii']);
 
-        spm_file_merge(mov_spm_vol(ii), mov3DName); % copy present "offset to move" to tmp_spm\mov.nii
-        if runBFC
-            if UseOnlyGM
-                CreateBinaryBrainmaskWithSPM(mov3DName, .2, ii, 0, 0);
-                spm_vol_new(ii).mat = RunSPMCoregistration(fix3DName,mov3DUseOnlyGMName,spmMethod);
-            else
-                apply_bias_field(mov3DName, sharedBiasField, mov3DBFCName);
-                spm_vol_new(ii).mat = RunSPMCoregistration(fix3DName,mov3DBFCName,spmMethod);
-            end
-        else
-            if UseOnlyGM
-                CreateBinaryBrainmaskWithSPM(mov3DName, .2, ii, 0, 0);
-                spm_vol_new(ii).mat = RunSPMCoregistration(fix3DName,mov3DUseOnlyGMName,spmMethod);
-            else
-                spm_vol_new(ii).mat = RunSPMCoregistration(fix3DName,mov3DName,spmMethod);
-            end
-        end
-        txMats{ii+1,1} = spm_vol_new(ii).mat;
-    %else
-
+    spm_file_merge(mov_spm_vol(ii), mov3DName); % copy present "offset to move" to tmp_spm\mov_<ii>.nii
+    if UseOnlyGM
+        CreateBinaryBrainmaskWithSPM(mov3DName, .2, ii, 0, 0);
+        srcName = mov3DUseOnlyGMName;
+    elseif runBFC
+        apply_bias_field(mov3DName, sharedBiasField, mov3DBFCName);
+        srcName = mov3DBFCName;
+    else
+        srcName = mov3DName;
     end
-
+    coregMats{k} = RunSPMCoregistration(fix3DName, srcName, spmMethod, 'nmi', {''}, coregSep);
+    fprintf('MOCO: offset %d coregistered\n', ii);
+end
+for k = 1:nCoreg
+    ii = mov_index_incomplete(k);
+    spm_vol_new(ii).mat = coregMats{k};
+    txMats{ii+1,1} = coregMats{k};
 end
 
 % for ii = mov_index_incomplete

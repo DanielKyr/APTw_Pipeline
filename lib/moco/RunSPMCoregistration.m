@@ -1,4 +1,9 @@
-function [T_RS, T_R, Tx] = RunSPMCoregistration(refImg, srcImg, spmMethod, costFunction, otherImg)
+function [T_RS, T_R, Tx] = RunSPMCoregistration(refImg, srcImg, spmMethod, costFunction, otherImg, sep)
+% spmMethod 0/1 (coregister: estimate) call spm_coreg directly - the same
+% computation spm_run_coreg does, minus the matlabbatch/spm_jobman layer,
+% which adds ~1s of overhead per call and is not needed for a single
+% estimate. sep (optional) overrides the sampling schedule in mm
+% (default [4] for method 0, [7 4 2] for method 1).
 
 %init output matrices
 T_RS = eye(4);
@@ -23,36 +28,31 @@ if nargin < 5
     otherImg = {''};
 end
 
-if spmMethod==0  % like 1 but fast
-    % spm.spatial.coreg
-    matlabbatch{1}.spm.spatial.coreg.estimate.ref = {[refImg ',1']};
-    matlabbatch{1}.spm.spatial.coreg.estimate.source = {[srcImg ',1']};
-    matlabbatch{1}.spm.spatial.coreg.estimate.other = otherImg;
-    matlabbatch{1}.spm.spatial.coreg.estimate.eoptions.cost_fun = costFunction;
-    matlabbatch{1}.spm.spatial.coreg.estimate.eoptions.sep = [4];
-    matlabbatch{1}.spm.spatial.coreg.estimate.eoptions.tol = [0.02 0.02 0.02 0.001 0.001 0.001 0.01 0.01 0.01 0.001 0.001 0.001];
-    matlabbatch{1}.spm.spatial.coreg.estimate.eoptions.fwhm = [7 7];
-    
-    spm('defaults', 'FMRI');
-    spm_jobman('run', matlabbatch, cell(0,1));
-    
-    %transformation from source to ref
-    T_RS = spm_get_space(srcImg);
+if nargin < 6
+    sep = [];
 end
 
-if spmMethod==1
-    % spm.spatial.coreg
-    matlabbatch{1}.spm.spatial.coreg.estimate.ref = {[refImg ',1']};
-    matlabbatch{1}.spm.spatial.coreg.estimate.source = {[srcImg ',1']};
-    matlabbatch{1}.spm.spatial.coreg.estimate.other = otherImg;
-    matlabbatch{1}.spm.spatial.coreg.estimate.eoptions.cost_fun = costFunction;
-    matlabbatch{1}.spm.spatial.coreg.estimate.eoptions.sep = [7 4 2];
-    matlabbatch{1}.spm.spatial.coreg.estimate.eoptions.tol = [0.02 0.02 0.02 0.001 0.001 0.001 0.01 0.01 0.01 0.001 0.001 0.001];
-    matlabbatch{1}.spm.spatial.coreg.estimate.eoptions.fwhm = [7 7];
-    
-    spm('defaults', 'FMRI');
-    spm_jobman('run', matlabbatch, cell(0,1));
-    
+if spmMethod==0 || spmMethod==1
+    if isempty(sep)
+        if spmMethod==0, sep = 4; else, sep = [7 4 2]; end % 0: like 1 but fast
+    end
+    flags = struct('cost_fun', costFunction, 'sep', sep, ...
+        'tol', [0.02 0.02 0.02 0.001 0.001 0.001 0.01 0.01 0.01 0.001 0.001 0.001], ...
+        'fwhm', [7 7], 'graphics', 0);
+    x = spm_coreg(refImg, srcImg, flags);
+
+    % apply the estimated rigid transform to the source (and any "other")
+    % image headers, exactly as spm_run_coreg does
+    PO = [{srcImg}; otherImg(~cellfun(@isempty, otherImg(:)))];
+    M  = spm_matrix(x);
+    MM = zeros(4, 4, numel(PO));
+    for j = 1:numel(PO)
+        MM(:,:,j) = spm_get_space(PO{j});
+    end
+    for j = 1:numel(PO)
+        spm_get_space(PO{j}, M\MM(:,:,j));
+    end
+
     %transformation from source to ref
     T_RS = spm_get_space(srcImg);
 end

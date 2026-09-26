@@ -21,6 +21,10 @@ function out = run_APTw_subject(subjFolder, cfg)
 % map - see evaluate_subject_own_maps.m / Evaluate_APTw_Results.m for that.
 
 if ~isfield(cfg, 'emit_stage_markers'), cfg.emit_stage_markers = false; end
+if isfield(cfg, 'use_parallel')
+    if ~isfield(cfg, 'max_workers'), cfg.max_workers = 0; end
+    aptw_parallel_enabled(cfg.use_parallel, cfg.max_workers);
+end
 
 [~, subjectID] = fileparts(subjFolder); % used to name every file this run produces
 niiFolder   = fullfile(subjFolder, 'nii');
@@ -100,7 +104,7 @@ if ~isequal(size(dB0map), size(M0_stack))
            'to match the other before running this pipeline.'], mat2str(size(dB0map)), mat2str(size(M0_stack)));
 end
 
-if cfg.emit_stage_markers, fprintf('__STAGE__:PROCESS_START\n'); end
+if cfg.emit_stage_markers, fprintf('__STAGE__:B0CORR_START\n'); end
 % ---- 5. Correct each voxel's Z-spectrum for its local B0 offset
 %         (using the WASABI dB0 map), then normalize to the M0 signal.
 %
@@ -118,6 +122,7 @@ Mz_CORR            = B0_CORRECTION(yfit, dB0map, Pfit, Segment);
 [Z_corrExt, ~, normType] = NORM_ZSTACK(Mz_CORR, M0_stack, P, Segment);
 P.EVAL.normalizationType = normType;
 P.EVAL.normalization     = 'M0_stack';
+if cfg.emit_stage_markers, fprintf('__STAGE__:B0CORR_DONE\n__STAGE__:DENOISE_START\n'); end
 
 % ---- 6. Denoise via local PCA (first N components kept). BrainOnlyMask (not the
 %         wider Segment) trains the PCA basis - see pcca_3D.m's header comment and
@@ -126,6 +131,7 @@ P.EVAL.normalization     = 'M0_stack';
 
 % ---- 6b. Optional spatial smoothing (OFF by default - see cfg.spatial_smooth_sigma).
 Z_corrExt_denoised = apply_spatial_smoothing(Z_corrExt_denoised, cfg.spatial_smooth_sigma);
+if cfg.emit_stage_markers, fprintf('__STAGE__:DENOISE_DONE\n__STAGE__:B1MAPS_START\n'); end
 
 % ---- 7. B1 correction: interpolate each voxel's Z-spectrum from the
 %         (B1=0 baseline, measured-B1) pair to the mean nominal B1 of
@@ -223,7 +229,7 @@ full_spectra = struct( ...
     'APTw_full_rex',         MTRasym_rex);
 spectraFile = fullfile(zevalFolder, [subjectID '_APTw_full_Zspectra.mat']);
 save(spectraFile, '-struct', 'full_spectra', '-v7.3');
-if cfg.emit_stage_markers, fprintf('__STAGE__:PROCESS_DONE\n'); end
+if cfg.emit_stage_markers, fprintf('__STAGE__:B1MAPS_DONE\n'); end
 
 out = results;
 out.full_spectra_file = spectraFile;

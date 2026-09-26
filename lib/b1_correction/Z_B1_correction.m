@@ -101,6 +101,7 @@ end
 
 
 try 
+    if ~aptw_ensure_pool(), error('parallel processing disabled or unavailable'); end % starts a pool of cfg.max_workers if needed
     license('test','Distrib_Computing_Toolbox')
     Composite();
 catch

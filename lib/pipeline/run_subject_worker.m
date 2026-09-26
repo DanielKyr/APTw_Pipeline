@@ -34,9 +34,7 @@ fclose(fid);
 diary(d.logFile);
 diary('on');
 try
-    fprintf('__STAGE__:PREPARE_START\n');
-    prepare_one_subject(d.subjPath, d.cfg, d.binFolder);
-    fprintf('__STAGE__:PREPARE_DONE\n');
+    prepare_one_subject(d.subjPath, d.cfg, d.binFolder); % emits its own DICOM/MOCO markers (cfg.emit_stage_markers)
 
     run_APTw_subject(d.subjPath, d.cfg); % emits its own SEGMENT/WASABI/PROCESS markers (cfg.emit_stage_markers)
 

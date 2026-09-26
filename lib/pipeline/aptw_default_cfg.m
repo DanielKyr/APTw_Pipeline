@@ -19,6 +19,11 @@ cfg.force_moco             = false; % Prepare: redo motion correction even if a 
 cfg.force_segmentation     = false; % Run: redo SPM brain segmentation even if cached
 cfg.force_wasabi           = false; % Run: redo the WASABI B0/B1 fit even if cached
 
+% ---- performance (Prepare + Run) ----
+cfg.use_parallel  = true; % false: never use the parallel pool anywhere (MOCO, WASABI fit, B0/B1 correction) - see aptw_parallel_enabled.m
+cfg.max_workers   = 0;    % parallel pool size cap; 0 = auto (one worker per physical core) - see aptw_ensure_pool.m
+cfg.moco_coreg_sep = [7 4 2]; % SPM coregistration sampling schedule (mm), coarse-to-fine; SPM's own default
+
 % ---- brain mask definition (Run) ----
 cfg.mask_threshold = 0.2;    % GM+WM+CSF probability threshold (BrainOnlyMask / PCA training set)
 cfg.use_c6         = true;   % true: Segment = everything but pure background air (c6); false: GM+WM+CSF>threshold only

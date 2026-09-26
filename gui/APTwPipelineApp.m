@@ -38,8 +38,10 @@ classdef APTwPipelineApp < handle
         CurrentStartTic = uint64(0)
         LogFilePos double = 0
         LogPendingPartial char = '' % text read but not yet newline-terminated, held for the next poll
-        StageNames = {'Prepare (DICOM/MOCO)', 'Brain segmentation', 'WASABI B0/B1 fit', 'Denoise + B1 correction', 'Export (NIfTI/DICOM)'}
-        StageStates = {'pending', 'pending', 'pending', 'pending', 'pending'}
+        LastAliveCheckTic = uint64(0) % throttles the (slow-ish) tasklist liveness check in onPollTick
+        StageNames = {'DICOM -> NIfTI', 'Motion correction (SPM coreg)', 'Brain segmentation (SPM)', 'WASABI B0/B1 fit', ...
+            'B0 correction (spline)', 'PCA denoising', 'B1 correction + APTw maps', 'Export (NIfTI/DICOM)'}
+        StageStates = repmat({'pending'}, 1, 8)
 
         CurrentViewerResults = []
         CurrentViewerSpectra = []
@@ -68,6 +70,8 @@ classdef APTwPipelineApp < handle
         ForceMocoCheckBox
         ForceSegCheckBox
         ForceWasabiCheckBox
+        UseParallelCheckBox
+        MaxWorkersSpinner
         MetricDropDown
         B1CorrectedCheckBox
         SmoothSigmaSpinner
@@ -237,7 +241,7 @@ classdef APTwPipelineApp < handle
             leftPanel.Layout.Column = 1; leftPanel.Layout.Row = 1;
 
             app.LeftGrid = uigridlayout(leftPanel, [7 1]);
-            app.LeftGrid.RowHeight = {22, '1x', 36, 150, 300, 26, 0};
+            app.LeftGrid.RowHeight = {22, '1x', 36, 190, 357, 26, 0};
             app.LeftGrid.Padding = [8 8 8 8]; app.LeftGrid.RowSpacing = 6;
 
             uilabel(app.LeftGrid, 'Text', 'Subjects', 'FontWeight', 'bold');
@@ -281,8 +285,8 @@ classdef APTwPipelineApp < handle
         function buildBasicConfigPanel(app, parent)
             p = uipanel(parent, 'Title', 'Processing options');
             p.Layout.Row = 5;
-            g = uigridlayout(p, [9 2]);
-            g.RowHeight = repmat({24}, 1, 9);
+            g = uigridlayout(p, [11 2]);
+            g.RowHeight = repmat({24}, 1, 11);
             g.ColumnWidth = {'1x', 110};
             g.Padding = [6 4 6 4]; g.RowSpacing = 3;
 
@@ -311,6 +315,18 @@ classdef APTwPipelineApp < handle
 
             app.SaveOutputsCheckBox = uicheckbox(g, 'Text', 'Export NIfTI + DICOM after run', 'Value', true);
             app.SaveOutputsCheckBox.Layout.Row = 9; app.SaveOutputsCheckBox.Layout.Column = [1 2];
+
+            app.UseParallelCheckBox = uicheckbox(g, 'Text', 'Use parallel processing', 'Value', true, ...
+                'Tooltip', 'Runs MOCO, the WASABI fit and B0/B1 correction on a parallel pool. Turn off on low-memory PCs or if a run misbehaves - everything then runs serially.', ...
+                'ValueChangedFcn', @(src,~) set(app.MaxWorkersSpinner, 'Enable', matlab.lang.OnOffSwitchState(src.Value)));
+            app.UseParallelCheckBox.Layout.Row = 10; app.UseParallelCheckBox.Layout.Column = [1 2];
+
+            lbl = uilabel(g, 'Text', 'Max parallel workers (0 = auto):'); lbl.Layout.Row = 11;
+            nCores = feature('numcores');
+            app.MaxWorkersSpinner = uispinner(g, 'Limits', [0 nCores], 'Step', 1, 'Value', 0, 'RoundFractionalValues', 'on', ...
+                'Tooltip', sprintf(['Caps the parallel pool size. 0 = one worker per physical core (%d on this PC). ' ...
+                'Each worker uses roughly 0.5-1 GB of RAM, so lower this on low-memory PCs.'], nCores));
+            app.MaxWorkersSpinner.Layout.Row = 11; app.MaxWorkersSpinner.Layout.Column = 2;
         end
 
         function buildAdvancedConfigPanel(app, parent)
@@ -527,6 +543,8 @@ classdef APTwPipelineApp < handle
             cfg.force_moco             = app.ForceMocoCheckBox.Value;
             cfg.force_segmentation     = app.ForceSegCheckBox.Value;
             cfg.force_wasabi           = app.ForceWasabiCheckBox.Value;
+            cfg.use_parallel           = app.UseParallelCheckBox.Value;
+            cfg.max_workers            = app.MaxWorkersSpinner.Value;
             if startsWith(app.MetricDropDown.Value, 'MTRRex')
                 cfg.aptw_metric = 'rex';
             else
@@ -625,6 +643,7 @@ classdef APTwPipelineApp < handle
             idx = app.BatchQueueIndices(app.BatchQueuePos);
             app.CurrentSubjIdx = idx;
             app.CurrentStartTic = tic;
+            app.LastAliveCheckTic = tic;
             app.LogFilePos = 0;
             app.LogPendingPartial = '';
             app.resetChecklist();
@@ -660,6 +679,12 @@ classdef APTwPipelineApp < handle
                 cmdStr = sprintf('start "" /B "%s" -batch "run_subject_worker(''%s'')"', ...
                     fullfile(matlabroot, 'bin', 'matlab.exe'), files.argsFile);
             end
+            % The worker MUST NOT inherit system()'s stdout/stderr: that is a
+            % pipe nobody reads once system() returns, so after ~4 KB of
+            % console output (typically mid-MOCO, where SPM prints the most)
+            % the worker's next print blocks forever at 0% CPU. Everything
+            % the GUI needs already goes to the diary log file.
+            cmdStr = [cmdStr ' >NUL 2>&1 <NUL'];
             [status, out] = system(cmdStr);
             if status ~= 0
                 app.appendLog(sprintf('Failed to launch background process for %s: %s', subj.ID, out));
@@ -725,6 +750,28 @@ classdef APTwPipelineApp < handle
                 return
             end
 
+            % A worker that crashes or is killed outside run_subject_worker's
+            % try/catch never writes a done file, which used to leave the
+            % subject stuck on "Running..." forever. Every few seconds, check
+            % the worker PID is still alive; if it's gone (and still no done
+            % file - re-checked to avoid racing a just-finished worker), fail
+            % the subject and move on.
+            if toc(app.LastAliveCheckTic) > 5
+                app.LastAliveCheckTic = tic;
+                if ~app.isWorkerAlive() && ~isfile(files.done)
+                    app.flushPendingPartial();
+                    msg = 'FAILED: worker process exited without reporting a result (crashed or was killed)';
+                    app.Subjects(idx).Status = 'FAILED';
+                    app.Subjects(idx).Error = msg;
+                    app.BatchNFailed = app.BatchNFailed + 1;
+                    app.appendLog(sprintf('===== %s : %s =====', app.Subjects(idx).ID, msg));
+                    app.refreshSubjectTable();
+                    app.CurrentSubjIdx = 0;
+                    app.startNextInQueue();
+                    return
+                end
+            end
+
             elapsed = toc(app.CurrentStartTic);
             app.Subjects(idx).Status = sprintf('Running... (%ds)', round(elapsed));
             app.refreshSubjectTable();
@@ -773,16 +820,22 @@ classdef APTwPipelineApp < handle
 
         function applyStageMarker(app, tok)
             markerMap = { ...
-                '__STAGE__:PREPARE_START', 1, 'active'
-                '__STAGE__:PREPARE_DONE',  1, 'done'
-                '__STAGE__:SEGMENT_START', 2, 'active'
-                '__STAGE__:SEGMENT_DONE',  2, 'done'
-                '__STAGE__:WASABI_START',  3, 'active'
-                '__STAGE__:WASABI_DONE',   3, 'done'
-                '__STAGE__:PROCESS_START', 4, 'active'
-                '__STAGE__:PROCESS_DONE',  4, 'done'
-                '__STAGE__:EXPORT_START',  5, 'active'
-                '__STAGE__:EXPORT_DONE',   5, 'done'};
+                '__STAGE__:DICOM_START',   1, 'active'
+                '__STAGE__:DICOM_DONE',    1, 'done'
+                '__STAGE__:MOCO_START',    2, 'active'
+                '__STAGE__:MOCO_DONE',     2, 'done'
+                '__STAGE__:SEGMENT_START', 3, 'active'
+                '__STAGE__:SEGMENT_DONE',  3, 'done'
+                '__STAGE__:WASABI_START',  4, 'active'
+                '__STAGE__:WASABI_DONE',   4, 'done'
+                '__STAGE__:B0CORR_START',  5, 'active'
+                '__STAGE__:B0CORR_DONE',   5, 'done'
+                '__STAGE__:DENOISE_START', 6, 'active'
+                '__STAGE__:DENOISE_DONE',  6, 'done'
+                '__STAGE__:B1MAPS_START',  7, 'active'
+                '__STAGE__:B1MAPS_DONE',   7, 'done'
+                '__STAGE__:EXPORT_START',  8, 'active'
+                '__STAGE__:EXPORT_DONE',   8, 'done'};
             row = find(strcmp(markerMap(:, 1), tok), 1);
             if isempty(row), return; end
             app.StageStates{markerMap{row, 2}} = markerMap{row, 3};
@@ -810,6 +863,20 @@ classdef APTwPipelineApp < handle
                 lines{i} = sprintf('%s %s', mark, app.StageNames{i});
             end
             app.ChecklistLabel.Text = lines;
+        end
+
+        function alive = isWorkerAlive(app)
+            % True unless the worker's PID is known AND no longer running.
+            % Before the worker has written its PID (startup can take a
+            % while under the MATLAB Runtime) it is assumed alive.
+            alive = true;
+            pidFile = app.CurrentRunFiles.pid;
+            if ~isfile(pidFile), return; end
+            pidStr = strtrim(fileread(pidFile));
+            if isempty(pidStr) || ~all(isstrprop(pidStr, 'digit')), return; end
+            [status, out] = system(sprintf('tasklist /FI "PID eq %s" /NH /FO CSV', pidStr));
+            if status ~= 0, return; end % can't tell - don't fail the subject on a tasklist hiccup
+            alive = contains(out, sprintf('"%s"', pidStr));
         end
 
         function killCurrentProcess(app)

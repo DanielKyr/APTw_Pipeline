@@ -11,7 +11,17 @@ function [Segment, c_all] = ensure_brain_segmentation(regFile, zevalFolder, subj
 % header for the GM+WM+CSF>threshold vs "everything but air" (c6) choice.
 
 segMat = fullfile(zevalFolder, [subjectID '_Segmentation.mat']);
-if isfile(segMat) && ~cfg.force_segmentation
+% A segmentation older than regFile was computed from a previous (possibly
+% incomplete/uncorrected) motion-correction output, so it is stale.
+isStale = false;
+if isfile(segMat) && isfile(regFile)
+    segInfo = dir(segMat); regInfo = dir(regFile);
+    isStale = segInfo.datenum < regInfo.datenum;
+end
+if isStale
+    fprintf('Existing brain segmentation predates the motion-corrected input - recomputing.\n');
+end
+if isfile(segMat) && ~cfg.force_segmentation && ~isStale
     fprintf('Reusing existing brain segmentation: %s\n', segMat);
     segData = load(segMat);
     Segment = segData.Segment;
