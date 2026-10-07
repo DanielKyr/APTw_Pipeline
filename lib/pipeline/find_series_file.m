@@ -8,7 +8,7 @@ function f = find_series_file(niiFolder, idStr, expectedVolumes)
 % given.
 if nargin < 3, expectedVolumes = []; end
 d = dir(fullfile(niiFolder, '*.nii'));
-d = d(~contains({d.name}, '_REG_') & ~contains({d.name}, 'resliced') & contains({d.name}, idStr));
+d = d(~contains({d.name}, '_REG_') & ~contains({d.name}, 'resliced') & contains({d.name}, idStr, 'IgnoreCase', true));
 if isempty(d)
     error('No NIfTI file found in %s matching "%s".', niiFolder, idStr);
 end

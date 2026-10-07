@@ -5,7 +5,7 @@ function tf = matching_nii_has_expected_volumes(niiFolder, idStr, expectedVolume
 % an existing conversion is actually usable before skipping reconversion.
 tf = false;
 d = dir(fullfile(niiFolder, '*.nii'));
-d = d(~contains({d.name}, '_REG_') & ~contains({d.name}, 'resliced') & contains({d.name}, idStr));
+d = d(~contains({d.name}, '_REG_') & ~contains({d.name}, 'resliced') & contains({d.name}, idStr, 'IgnoreCase', true));
 for k = 1:numel(d)
     try
         vol = readnifti(fullfile(niiFolder, d(k).name));

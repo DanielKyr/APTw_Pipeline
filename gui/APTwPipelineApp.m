@@ -337,8 +337,10 @@ classdef APTwPipelineApp < handle
             g.ColumnWidth = {'1x', 130};
             g.Padding = [6 4 6 4]; g.RowSpacing = 3;
 
+            def = aptw_default_cfg(); % field defaults come from the single source of truth
             lbl = uilabel(g, 'Text', 'APTw series ID:'); lbl.Layout.Row = 1;
-            app.SingleB1IdField = uieditfield(g, 'text', 'Value', 'APTw_001');
+            app.SingleB1IdField = uieditfield(g, 'text', 'Value', def.singleB1_id, ...
+                'Tooltip', 'Text the APTw series file name must contain (case-insensitive). If several series match, the one with the expected number of offsets is used.');
             app.SingleB1IdField.Layout.Row = 1; app.SingleB1IdField.Layout.Column = 2;
 
             lbl = uilabel(g, 'Text', 'WASABI series ID:'); lbl.Layout.Row = 2;

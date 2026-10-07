@@ -9,7 +9,9 @@ function cfg = aptw_default_cfg()
 cfg = struct();
 
 % ---- series identification (Prepare + Run) ----
-cfg.singleB1_id  = 'APTw_001';   % substring identifying the CEST Z-spectrum series
+cfg.singleB1_id  = 'APTw';       % substring identifying the CEST Z-spectrum series (case-insensitive; older
+                                 % exports were named ..._APTw_001_..., newer ones just ..._APTw_...). Other
+                                 % series that also contain it are told apart by volume count - see find_series_file.
 cfg.wasabi_id    = 'WASAB';      % substring identifying the WASABI series
 [cfg.aptw_seq, cfg.wasabi_seq] = aptw_sequence_config();
 
