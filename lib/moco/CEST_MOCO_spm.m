@@ -70,8 +70,9 @@ end
 mov_spm_vol = spm_vol(mov_name);
 
 FOV_mismatch=0;
-if any(mov_spm_vol(1).mat(:) ~= fix_spm_vol(1).mat(:))
-     warning('Your fix and moving files have a different voxel-to-world trafo.You have to use the resliced file with prefix r. Please, consult your supervisor, if you get this warning!');
+if max(abs(mov_spm_vol(1).mat(:) - fix_spm_vol(1).mat(:))) > 1e-3 % tolerance: ignore float noise between series headers
+     fprintf(['MOCO: the APTw and WASABI series have different slice geometry (voxel-to-world matrices differ).\n' ...
+              '      Also writing an "r"-prefixed copy resliced onto the WASABI grid - that copy is what the analysis uses.\n']);
      FOV_mismatch=1;
 end
 

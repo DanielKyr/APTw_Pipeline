@@ -182,6 +182,8 @@ for k = 1:numel(existing)
     delete(fullfile(niiFolder, existing(k).name));
     staleMarker = fullfile(niiFolder, [existing(k).name '.complete']);
     if isfile(staleMarker), delete(staleMarker); end
+    staleResliced = fullfile(niiFolder, ['r' existing(k).name]); % WASABI-grid copy, see CEST_MOCO_spm
+    if isfile(staleResliced), delete(staleResliced); end
 end
 
 origDir = pwd;

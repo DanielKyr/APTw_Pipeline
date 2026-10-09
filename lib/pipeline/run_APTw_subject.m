@@ -38,9 +38,27 @@ if isempty(reg)
     error(['No motion-corrected ("_REG_") NIfTI found in %s.\n' ...
            'Run Prepare_APTw_Data.m (or prepare_one_subject) on this subject first.'], niiFolder);
 end
+% The B0/B1 maps come from the WASABI scan, so the APTw input must be on the
+% WASABI voxel grid - same matrix size is NOT enough (a slab shifted by a
+% few slices has the same size). When the two series were acquired with
+% different geometry, CEST_MOCO_spm writes an extra "r"-prefixed copy
+% resliced onto the WASABI grid; that one is the correct input. Keep only
+% candidates whose grid matches WASABI's.
+Vw = spm_vol(wasabiFile);
+onWasabiGrid = false(1, numel(reg));
+for k = 1:numel(reg)
+    Vr = spm_vol(fullfile(niiFolder, reg(k).name));
+    onWasabiGrid(k) = isequal(Vr(1).dim, Vw(1).dim) && max(abs(Vr(1).mat(:) - Vw(1).mat(:))) < 1e-3;
+end
+if ~any(onWasabiGrid)
+    error(['No motion-corrected NIfTI in %s is on the WASABI voxel grid (%s):\n  %s\n' ...
+           'B0/B1 correction would be misaligned. Re-run with "Force redo: Motion correction".'], ...
+           niiFolder, wasabiFile, strjoin({reg.name}, sprintf('\n  ')));
+end
+reg = reg(onWasabiGrid);
 if numel(reg) > 1
     % Ambiguity here silently changes the input data, so refuse rather than guess.
-    error(['Found %d motion-corrected NIfTI files in %s:\n  %s\n' ...
+    error(['Found %d motion-corrected NIfTI files on the WASABI grid in %s:\n  %s\n' ...
            'Leave exactly one so the analysis input is unambiguous.'], ...
            numel(reg), niiFolder, strjoin({reg.name}, sprintf('\n  ')));
 end
