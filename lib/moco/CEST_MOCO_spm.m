@@ -69,11 +69,8 @@ end
 
 mov_spm_vol = spm_vol(mov_name);
 
-FOV_mismatch=0;
 if max(abs(mov_spm_vol(1).mat(:) - fix_spm_vol(1).mat(:))) > 1e-3 % tolerance: ignore float noise between series headers
-     fprintf(['MOCO: the APTw and WASABI series have different slice geometry (voxel-to-world matrices differ).\n' ...
-              '      Also writing an "r"-prefixed copy resliced onto the WASABI grid - that copy is what the analysis uses.\n']);
-     FOV_mismatch=1;
+     fprintf('MOCO: note - the APTw and WASABI series were acquired with different slice geometry.\n');
 end
 
 if isempty(mov_index) % if [] use :
@@ -302,19 +299,25 @@ end
 save([fpM '/TxParams.mat'], 'txMats');
 
 
-%reslice the motion corrected image onto fix stack (including resolution)
-if FOV_mismatch
-    % copyfile(new_name,['r' new_name]); 
-    spm_file_merge(spm_vol_new,['r' new_name]);  % seems to be necessary before reslicing
-    
-    flags.which=1;
-    flags.mask=0;
-    Image_stack = {fix3DName;['r' new_name]};
-    spm_reslice(Image_stack,flags); %Reslicing: adjust the resolution
-end
-
-%reslice the motion corrected image intrinsically 
-spm_reslice(spm_vol_new, flags);
+% Write the motion-corrected stack RESAMPLED ONTO THE REFERENCE (WASABI)
+% VOXEL GRID. The analysis works on voxel arrays, and the B0/B1 maps live on
+% the WASABI grid, so the APTw data must share that grid voxel-for-voxel.
+% Reslicing only "intrinsically" (onto the first registered offset, as this
+% used to) corrects motion between offsets but leaves the whole stack offset
+% from WASABI by offset 1's registration (measured 0.3-1.8 voxels on real
+% data), and by whole slices when the two series were planned differently.
+% Steps: merge the volumes with their registered headers into a temp 4D file,
+% reslice it onto the reference grid in place, then move it over new_name.
+moved4D = fullfile(tmpFolder, 'moved4D.nii');
+spm_file_merge(spm_vol_new, moved4D);
+flags.which = 1;   % reslice every image except the first (the reference)
+flags.mask  = 0;   % keep voxels even where an offset moved out of the FOV
+spm_reslice({fix3DName; moved4D}, flags);
+[newDir, newBase] = fileparts(new_name);
+if isempty(newDir), newDir = pwd; end
+staleSidecar = fullfile(newDir, [newBase '.mat']); % per-volume headers of the pre-reslice file; would override the new header
+if isfile(staleSidecar), delete(staleSidecar); end
+movefile(moved4D, fullfile(newDir, [newBase '.nii']), 'f');
 
 rmdir(tmpFolder, 's');
 delete *]spm.mat temp.nii

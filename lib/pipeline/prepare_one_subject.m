@@ -164,11 +164,19 @@ function regFile = ensure_motion_corrected(niiFolder, aptwFile, wasabiFile, cfg)
 % hang + restart) leaves a *_REG_* file that looks finished but isn't
 % motion-corrected at all. Only a *_REG_* file with a "<name>.complete"
 % marker next to it - written below once CEST_MOCO has fully returned - is
-% trusted; anything else is deleted and redone.
+% trusted; anything else is deleted and redone. A complete file is also only
+% reused if it is on the WASABI voxel grid: output from versions before
+% CEST_MOCO_spm resliced onto WASABI is off by a fraction of a voxel or more,
+% so it is redone automatically.
 [~, aptwBase] = fileparts(aptwFile);
 existing = dir(fullfile(niiFolder, [aptwBase '_REG_*.nii']));
 if ~cfg.force_moco
     complete = arrayfun(@(e) isfile(fullfile(niiFolder, [e.name '.complete'])), existing);
+    onGrid = arrayfun(@(e) nii_on_same_grid(fullfile(niiFolder, e.name), wasabiFile), existing);
+    if any(complete & ~onGrid)
+        fprintf('Existing motion-corrected file is not on the WASABI voxel grid (older pipeline version) - redoing motion correction.\n');
+    end
+    complete = complete & onGrid;
     if any(complete)
         done = existing(complete);
         [~, idx] = max([done.datenum]);
@@ -182,8 +190,13 @@ for k = 1:numel(existing)
     delete(fullfile(niiFolder, existing(k).name));
     staleMarker = fullfile(niiFolder, [existing(k).name '.complete']);
     if isfile(staleMarker), delete(staleMarker); end
-    staleResliced = fullfile(niiFolder, ['r' existing(k).name]); % WASABI-grid copy, see CEST_MOCO_spm
-    if isfile(staleResliced), delete(staleResliced); end
+    [~, staleBase] = fileparts(existing(k).name);
+    staleExtras = {['r' existing(k).name], ...     % WASABI-grid copy written by older versions
+                   [staleBase '.mat']};            % SPM per-volume header sidecar
+    for j = 1:numel(staleExtras)
+        f = fullfile(niiFolder, staleExtras{j});
+        if isfile(f), delete(f); end
+    end
 end
 
 origDir = pwd;

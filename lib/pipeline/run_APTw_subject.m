@@ -40,16 +40,10 @@ if isempty(reg)
 end
 % The B0/B1 maps come from the WASABI scan, so the APTw input must be on the
 % WASABI voxel grid - same matrix size is NOT enough (a slab shifted by a
-% few slices has the same size). When the two series were acquired with
-% different geometry, CEST_MOCO_spm writes an extra "r"-prefixed copy
-% resliced onto the WASABI grid; that one is the correct input. Keep only
-% candidates whose grid matches WASABI's.
-Vw = spm_vol(wasabiFile);
-onWasabiGrid = false(1, numel(reg));
-for k = 1:numel(reg)
-    Vr = spm_vol(fullfile(niiFolder, reg(k).name));
-    onWasabiGrid(k) = isequal(Vr(1).dim, Vw(1).dim) && max(abs(Vr(1).mat(:) - Vw(1).mat(:))) < 1e-3;
-end
+% few slices, or by offset 1's registration, has the same size).
+% CEST_MOCO_spm reslices its output onto the WASABI grid; older outputs
+% (including "r"-prefixed copies from before that) are filtered out here.
+onWasabiGrid = arrayfun(@(e) nii_on_same_grid(fullfile(niiFolder, e.name), wasabiFile), reg(:)');
 if ~any(onWasabiGrid)
     error(['No motion-corrected NIfTI in %s is on the WASABI voxel grid (%s):\n  %s\n' ...
            'B0/B1 correction would be misaligned. Re-run with "Force redo: Motion correction".'], ...
